@@ -1,13 +1,14 @@
 BEGIN { push @INC, './' }
 use strict;
 use File::Find;
+use FileHandle;
 use File::Path qw(make_path);
 use DBI;
 use Getopt::Long;
 # CZImporthelper.pm中存放的是czimport会用到的一些函数
 use CZImporthelper;
 
-# 设定下面十一个变量的缺省值，它们的值都可以通过命令行参数来修改
+# 设定下面十二个变量的缺省值，它们的值都可以通过命令行参数来修改
 my $dmpglob='';
 my $dirs='';
 my $outdir='';
@@ -19,6 +20,7 @@ my $tbs='sccz';
 my $hostname='localhost';
 my $sid='orcl';
 my $help=0;
+my $logfile='importlog.txt';
   
 my @dmpfiles;                           #此数组存放所有待导入dmp文件名
 my @statements;                         #此数组存放从SQL文件中读入的语句
@@ -59,7 +61,8 @@ sub ParseCommand
 		'tbs=s' => \$tbs,
 		'host=s' => \$hostname,
 		'sid=s' => \$sid,
-		'help!' => \$help);
+		'help!' => \$help,
+		'log'   => \$logfile);
 
 	#如果有不识别的参数等问题，则直接退出
 	if(!$result) 
@@ -119,6 +122,9 @@ sub ParseCommand
 		print "Cannot find the sql script file $sqlfilepath.\n";
 		exit(1);
 	}
+
+	$logfile=~s/\\/\//g;
+
 	&ImportFile();
 }
 
@@ -131,6 +137,12 @@ sub ParseCommand
 #############################################################
 sub ImportFile
 {
+	my $filenum=0;                #用于统计处理的文件数
+	my $timestamp=localtime;      #用于获取时间
+    open LOG, ">$logfile" or die "Cannot open log file to write!";
+	print LOG "开始运行czimport程序, 时间是$timestamp.\n";
+	print LOG '='x30, "\n";
+
 	#下面判断用户有无指定sql脚本文件，有则读入内容并分解为多个SQL语句
 	if($sqlfilepath)
 	{
@@ -150,7 +162,9 @@ sub ImportFile
 		print CU "exit;\n";
 		close CU;
 		system("sqlplus sys/$syspass\@$sid as sysdba \@cu.sql")==0 or die "Cannot execute user creation command.";
-		
+		$timestamp=localtime;
+		print LOG "开始导入$dmpfile，时间是$timestamp.\n";
+
 		#判断有无--tables选项，有则导入指定表，否则导入全部表
 		if($tables)
 		{
@@ -160,6 +174,10 @@ sub ImportFile
 		{
 			system("imp $user_name/$user_name\@$sid file=\'$dmpfile\' full=y ignore=y");
 		}
+
+		$timestamp=localtime;
+		print LOG "结束导入$dmpfile, 时间是$timestamp.\n";
+		$filenum++;
 
 		#如果指定了--outdir选项，则把csv文件保存到指定目录
 		if($outdir)
@@ -180,12 +198,16 @@ sub ImportFile
 			
 			# 下面逐条执行从文件中读取的SQL语句，将结果存在“dmp文件名_计数.csv“文件中
 			my $count=1;
-			my $tname='';
-			my $saveout=0;
+			my $tname='';          #export后面跟的表名
+			my $iname='';          #insert后面跟的表名
+			my $saveout=0;         #判断是否保存为CSV
+			my $insertdata=0;      #判断是否插入数据库
 			my $tmp;
 			foreach my $statement (@statements)
 			{
 				$tmp=$statement;
+				my $sth;
+				
 				#判断语句前有没有"--export"注释，有就保存为CSV文件，否则就仅执行语句
 				if($tmp=~/-{2,}export/)
 				{
@@ -199,9 +221,40 @@ sub ImportFile
 						$tmp=~s/-{2,}export//;
 					}
 					$saveout=1;
+					$sth = $dbh->prepare($tmp) or die "Cannot prepare $tmp: $dbh->errstr/n";
+					$sth->execute() or die "Cannot execute the query: $sth->errstr";
 				}
-				my $sth = $dbh->prepare($tmp) or die "Cannot prepare $tmp: $dbh->errstr/n";
-				$sth->execute() or die "Cannot execute the query: $sth->errstr";
+				
+				#判断语句前有没有"--insert"注释，有就插入指定表，否则就仅执行语句
+				elsif($tmp=~s/-{2,}insert (\S+) select//i)
+				{
+					$iname=$1;
+					$iname=~s/\s+//g;
+					#判断是否是第一个导入文件，如果是就用create table as，并且加入source_user字段，否则用insert into
+					if($filenum==1)
+					{
+						$tmp="create table $iname as select \'$user_name\' source_user, ".$tmp;
+						$sth = $dbh->prepare($tmp) or die "Cannot prepare $tmp: $dbh->errstr/n";
+						$sth->execute() or die "Cannot execute the query: $sth->errstr";
+						my $alt="alter table $iname modify (source_user char(30))";
+						my $sth2 = $dbh->prepare($alt) or die "Cannot prepare $alt: $dbh->errstr/n";
+						$sth2->execute() or die "Cannot alter the table structure: $sth->errstr";
+					}
+					else
+					{
+						$tmp="insert into $iname select \'$user_name\' source_user, ".$tmp;
+						$sth = $dbh->prepare($tmp) or die "Cannot prepare $tmp: $dbh->errstr/n";
+						$sth->execute() or die "Cannot execute the query: $sth->errstr";
+					}
+					$saveout=0;
+				}
+				else
+				{
+					$saveout=0;
+					$sth = $dbh->prepare($tmp) or die "Cannot prepare $tmp: $dbh->errstr/n";
+					$sth->execute() or die "Cannot execute the query: $sth->errstr";
+				}
+
 				if($saveout)
 				{
 					#下面执行导出为CSV的操作，首先判断--export后有没有表名，如果有就把$tname作为后缀，否则用$count作后缀
@@ -237,7 +290,16 @@ sub ImportFile
 			close DU;
 			system("sqlplus sys/$syspass\@$sid as sysdba \@du.sql")==0 or die "Cannot execute user deletion command.";
 		}
+		
+		$timestamp=localtime;
+		print LOG "完成处理$dmpfile，时间是$timestamp.\n";
+		print LOG '-'x30, "\n";
+		LOG->flush();
 	}
+	$timestamp=localtime;
+	print LOG "完成全部处理，共处理$filenum个文件.\n";
+	print LOG '='x30, "\n";
+	close LOG;
 }
 
 &ParseCommand();

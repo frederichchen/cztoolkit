@@ -26,6 +26,7 @@ sub DisplayHelp
 	print "  --outdir=     the directory to hold the result csv files.\n";
 	print "  --tables=     comma seperated table names to be import.\n";
 	print "  --sql=        the sql script to be executed after importing the data.\n";
+	print "  --log=        the path of the log file.\n";
 	print "  --du          delete the user the tables belongs to him at last.\n";
 }
 
@@ -54,10 +55,10 @@ sub ParseSQL
 		#如果不是空行，则表明是语句或注释
 		if($_)
 		{
-	        #判断是否为--export注释，如果是则保留这行，如果为其他注释，则删除这行
+	        #判断是否为--export或--insert注释，如果是则保留这行，如果为其他注释，则删除这行
 			if(/^-{2,}(\S+)/)
 			{
-				if($1 ne 'export')
+				if(($1 ne 'export') and ($1 ne 'insert'))
 				{
 					$_='';
 				}
