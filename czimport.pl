@@ -194,7 +194,12 @@ sub ImportFile
 		#下面判断用户有无指定sql脚本文件，有则连接数据库执行sql脚本
 		if($sqlfilepath)
 		{
+			#连接数据库并让数据库不区分大小写
 			my $dbh=DBI->connect("dbi:Oracle:host=$hostname;sid=$sid", $user_name, $user_name) or die "Cannot conenct db: $DBI::errstr\n";
+			my $case_insensitive_sth1=$dbh->prepare("ALTER SESSION SET NLS_COMP=ANSI");
+			my $case_insensitive_sth2=$dbh->prepare("ALTER SESSION SET NLS_SORT=BINARY_CI");
+			$case_insensitive_sth1->execute() or die "Cannot execute the query: $case_insensitive_sth1->errstr";
+			$case_insensitive_sth2->execute() or die "Cannot execute the query: $case_insensitive_sth2->errstr";
 			
 			# 下面逐条执行从文件中读取的SQL语句，将结果存在“dmp文件名_计数.csv“文件中
 			my $count=1;
@@ -209,7 +214,7 @@ sub ImportFile
 				my $sth;
 				
 				#判断语句前有没有"--export"注释，有就保存为CSV文件，否则就仅执行语句
-				if($tmp=~/-{2,}export/)
+				if($tmp=~/-{2,}export/i)
 				{
 					if($tmp=~s/-{2,}export (\S+) select/select/i)
 					{
@@ -218,7 +223,7 @@ sub ImportFile
 					}
 					else
 					{
-						$tmp=~s/-{2,}export//;
+						$tmp=~s/-{2,}export//i;
 					}
 					$saveout=1;
 					$sth = $dbh->prepare($tmp) or die "Cannot prepare $tmp: $dbh->errstr/n";
@@ -230,15 +235,22 @@ sub ImportFile
 				{
 					$iname=$1;
 					$iname=~s/\s+//g;
-					#判断是否是第一个导入文件，如果是就用create table as，并且加入source_user字段，否则用insert into
-					if($filenum==1)
+
+					#把iname中的用户名和表名分开来
+					my @iname_array=split(/\./, $iname);
+					
+					#判断待插入的表是否存在，不存在就用create table创建并alter table加入source_user字段，存在则insert
+					my $hastable="select * from all_tables where owner=\'$iname_array[0]\' and table_name=\'$iname_array[1]\'";
+					$sth = $dbh->prepare($hastable) or die "Cannot prepare $tmp: $dbh->errstr/n";
+					$sth->execute() or die "Cannot execute the query: $sth->errstr";
+					if(!$sth->fetchrow_array())
 					{
 						$tmp="create table $iname as select \'$user_name\' source_user, ".$tmp;
 						$sth = $dbh->prepare($tmp) or die "Cannot prepare $tmp: $dbh->errstr/n";
 						$sth->execute() or die "Cannot execute the query: $sth->errstr";
 						my $alt="alter table $iname modify (source_user char(30))";
 						my $sth2 = $dbh->prepare($alt) or die "Cannot prepare $alt: $dbh->errstr/n";
-						$sth2->execute() or die "Cannot alter the table structure: $sth->errstr";
+						$sth2->execute() or die "Cannot alter the table structure: $sth2->errstr";
 					}
 					else
 					{

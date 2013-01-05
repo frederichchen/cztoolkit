@@ -58,13 +58,13 @@ sub ParseSQL
 	        #判断是否为--export或--insert注释，如果是则保留这行，如果为其他注释，则删除这行
 			if(/^-{2,}(\S+)/)
 			{
-				if(($1 ne 'export') and ($1 ne 'insert'))
+				if(($1=~/export/i) or ($1=~/insert/i))
 				{
-					$_='';
+					$tmp=$tmp.$_;
 				}
 				else
 				{
-					$tmp=$tmp.$_;
+					$_='';
 				}
 			}
 			else
